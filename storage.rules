@@ -1,0 +1,32 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'devgamerz3131@gmail.com' ||
+        request.auth.token.email == 'admin@rankify.app'
+      );
+    }
+
+    // Official community attachments (Admin upload, all authenticated read)
+    match /official_resources/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // Group study attachments
+    match /study_group_resources/{groupId}/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.resource.size < 15 * 1024 * 1024; // 15MB limit
+    }
+
+    // User private uploads
+    match /users/{userId}/{allPaths=**} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+  }
+}

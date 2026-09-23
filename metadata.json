@@ -1,0 +1,7 @@
+{
+  "name": "Rankify",
+  "description": "Smart personal study companion for Class 12 CBSE PCM with syllabus tracking, practice question bank, custom tests, backlog manager, and external AI Hub launcher (ChatGPT & Gemini).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

@@ -1,0 +1,174 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- HELPERS ---
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return exists(/databases/$(database)/documents/system_admins/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/system_admins/$(request.auth.uid)).data.role == "admin";
+    }
+
+    // Reward Logic Constants
+    function getRewardAmount(type) {
+      return type == 'DAILY_TARGET' ? 20 :
+             type == 'STUDY_SESSION' ? 15 :
+             type == 'PRACTICE' ? 20 :
+             type == 'CHAPTER_REVISION' ? 30 :
+             type == 'STREAK_BONUS' ? 10 : 0;
+    }
+
+    function getDailyLimit(type) {
+      return type == 'DAILY_TARGET' ? 100 :
+             type == 'STUDY_SESSION' ? 90 :
+             type == 'PRACTICE' ? 100 :
+             type == 'CHAPTER_REVISION' ? 90 :
+             type == 'STREAK_BONUS' ? 10 : 0;
+    }
+
+    // --- RANKIFY COIN WALLET (Legacy/Verified) ---
+    match /coin_wallet/{userId} {
+      allow read: if isAuthenticated() && isOwner(userId);
+      allow write: if false; 
+    }
+
+    match /coin_transactions/{transactionId} {
+      allow read: if isAuthenticated() && isOwner(resource.data.uid);
+      allow write: if false;
+    }
+
+    // --- STUDENT PROFILES ---
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow create: if isAuthenticated() && isOwner(userId);
+      allow update: if isAuthenticated() && isOwner(userId) && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'email', 'class', 'studentClass', 'board', 'stream', 'subjects',
+          'targetPercentage', 'dailyStudyGoalMinutes', 'preferredLanguage',
+          'languagePreference', 'hasUpcomingExam', 'examName', 'examDate',
+          'currentPrepLevel', 'streakDays', 'totalStudyMinutes', 'totalTestsAttempted',
+          'averageTestAccuracy', 'notesCount', 'updatedAt',
+          'uid', 'studyPlanConfigured', 'studyLevel', 'studyPlanSummary', 'targetsCount', 'createdAt'
+        ])
+      );
+
+      // --- STUDY POINTS WALLET (Harden Security) ---
+      match /study_points/current {
+        allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+        
+        // Combined validation for Rewards and Unlocks
+        allow create: if isOwner(userId) && request.resource.data.balance >= 0;
+        
+        allow update: if isOwner(userId)
+          && request.resource.data.updatedAt == request.time
+          && (
+            // A. VALID STUDY REWARD (EARN)
+            (
+              request.resource.data.lastSourceType != "UNLOCK_SONG"
+              && request.resource.data.lastSourceType != "PRACTICE_ATTEMPT"
+              && request.resource.data.balance == (resource.data.balance != null ? resource.data.balance : 0) + getRewardAmount(request.resource.data.lastSourceType)
+              && request.resource.data.totalEarned == (resource.data.totalEarned != null ? resource.data.totalEarned : 0) + (request.resource.data.balance - (resource.data.balance != null ? resource.data.balance : 0))
+              && request.resource.data.totalSpent == (resource.data.totalSpent != null ? resource.data.totalSpent : 0)
+              && request.resource.data.dailyCategoryTotals[request.resource.data.lastSourceType] <= getDailyLimit(request.resource.data.lastSourceType)
+              && existsAfter(/databases/$(database)/documents/users/$(userId)/study_point_transactions/$(request.resource.data.lastTransactionId))
+            )
+            ||
+            // B. VALID SONG UNLOCK (SPEND)
+            (
+              request.resource.data.lastSourceType == "UNLOCK_SONG"
+              && request.resource.data.balance == (resource.data.balance != null ? resource.data.balance : 0) - get(/databases/$(database)/documents/exclusive_music_videos/$(request.resource.data.lastUnlockVideoId)).data.coinPrice
+              && request.resource.data.totalSpent == (resource.data.totalSpent != null ? resource.data.totalSpent : 0) + ((resource.data.balance != null ? resource.data.balance : 0) - request.resource.data.balance)
+              && request.resource.data.totalEarned == (resource.data.totalEarned != null ? resource.data.totalEarned : 0)
+              && request.resource.data.balance >= 0
+              && existsAfter(/databases/$(database)/documents/users/$(userId)/song_unlocks/$(request.resource.data.lastUnlockVideoId))
+              && existsAfter(/databases/$(database)/documents/users/$(userId)/study_point_transactions/$(request.resource.data.lastTransactionId))
+              && !exists(/databases/$(database)/documents/users/$(userId)/song_unlocks/$(request.resource.data.lastUnlockVideoId))
+            )
+            ||
+            // C. VALID PRACTICE ATTEMPT (NO REWARD)
+            (
+              request.resource.data.lastSourceType == "PRACTICE_ATTEMPT"
+              && request.resource.data.balance == (resource.data.balance != null ? resource.data.balance : 0)
+              && request.resource.data.totalEarned == (resource.data.totalEarned != null ? resource.data.totalEarned : 0)
+              && request.resource.data.totalSpent == (resource.data.totalSpent != null ? resource.data.totalSpent : 0)
+              && request.resource.data.dailyCategoryTotals["PRACTICE_ATTEMPTS"] == (resource.data.dailyCategoryTotals["PRACTICE_ATTEMPTS"] != null ? resource.data.dailyCategoryTotals["PRACTICE_ATTEMPTS"] : 0) + 1
+            )
+          );
+      }
+
+      // --- STUDY POINT TRANSACTIONS ---
+      match /study_point_transactions/{transId} {
+        allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+        allow create: if isOwner(userId) 
+          && request.resource.data.createdAt == request.time
+          && (
+            // EARN Transaction
+            (request.resource.data.type == "EARN" && request.resource.data.amount == getRewardAmount(request.resource.data.sourceType))
+            ||
+            // SPEND Transaction
+            (request.resource.data.type == "SPEND" 
+             && request.resource.data.amount == -get(/databases/$(database)/documents/exclusive_music_videos/$(request.resource.data.sourceId)).data.coinPrice
+             && transId == "SPEND_UNLOCK_" + request.resource.data.sourceId)
+          );
+        allow update, delete: if false;
+      }
+
+      // --- SONG UNLOCKS ---
+      match /song_unlocks/{videoId} {
+        allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+        allow create: if isOwner(userId)
+          && get(/databases/$(database)/documents/exclusive_music_videos/$(videoId)).data.published == true
+          && request.resource.data.pointsSpent == get(/databases/$(database)/documents/exclusive_music_videos/$(videoId)).data.coinPrice
+          && request.resource.data.unlockedAt == request.time;
+        allow update, delete: if false;
+      }
+      
+      // Generic subcollections (Notes, etc.)
+      match /{allSubcollections=**} {
+        allow read, write: if isAuthenticated() && isOwner(userId);
+      }
+    }
+
+    // --- EXCLUSIVE CONTENT ---
+    match /exclusive_music_videos/{videoId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /exclusive_music_video_sources/{videoId} {
+      allow read: if isAdmin() || (
+        isAuthenticated() && 
+        get(/databases/$(database)/documents/exclusive_music_videos/$(videoId)).data.published == true
+      );
+      allow write: if isAdmin();
+    }
+
+    // --- SYSTEM ---
+    match /system_admins/{uid} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // --- OTHER COLLECTIONS (Preserve) ---
+    match /study_materials/{resourceId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /daily_targets/{targetId} {
+      allow read, write: if isAuthenticated() && isOwner(resource.data.uid);
+    }
+
+    match /study_sessions/{sessionId} {
+      allow read, write: if isAuthenticated() && isOwner(resource.data.uid);
+    }
+  }
+}
